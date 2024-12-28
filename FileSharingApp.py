@@ -6,6 +6,8 @@ import threading
 import shutil
 from PIL import Image, ImageTk
 import sv_ttk
+import datetime
+import sys
 
 class FileSharingApp(tk.Tk):
     def __init__(self):
@@ -40,11 +42,11 @@ class FileSharingApp(tk.Tk):
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=10)
 
-        self.logo = ImageTk.PhotoImage(Image.open("send-button.png").resize((50, 50)))
+        self.logo = ImageTk.PhotoImage(Image.open(self.resource_path("file-icon.png")).resize((50, 50)))
         logo_label = ttk.Label(title_frame, image=self.logo)
         logo_label.pack(side=tk.LEFT, padx=(0, 10))
 
-        title_label = ttk.Label(title_frame, text="MIMO File Sharing", font=("Segoe UI", 28, "bold"))
+        title_label = ttk.Label(title_frame, text="MEMO File Sharing", font=("Segoe UI", 28, "bold"))
         title_label.pack(side=tk.LEFT)
 
         # Mode toggle with animation
@@ -142,7 +144,7 @@ class FileSharingApp(tk.Tk):
             file_name = os.path.basename(file_path)
             dest_path = os.path.join(self.shared_directory, file_name)
             shutil.copy2(file_path, dest_path)
-            self.sharing_history.append(f"📤 Shared file '{file_name}' at {tk.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self.sharing_history.append(f"📤 Shared file '{file_name}' at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             self.update_history()
             self.update_file_tree()
             messagebox.showinfo("File Shared", f"File '{file_name}' has been shared successfully!")
@@ -238,6 +240,18 @@ class FileSharingApp(tk.Tk):
         for entry in self.sharing_history:
             self.history_list.insert(tk.END, entry)
 
+    @staticmethod
+    def resource_path(relative_path):
+        """ Get absolute path to resource, works for dev and for PyInstaller """
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+
+        return os.path.join(base_path, relative_path)
+
 if __name__ == "__main__":
     app = FileSharingApp()
     app.mainloop()
+
