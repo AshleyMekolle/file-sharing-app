@@ -8,11 +8,14 @@ from PIL import Image, ImageTk
 import sv_ttk
 import datetime
 import sys
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class FileSharingApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MIMO File Sharing App")
+        self.title("MEMO File Sharing App")
         self.geometry("1000x700")
         self.configure(bg="#f0f0f0")
         self.resizable(True, True)
@@ -42,7 +45,7 @@ class FileSharingApp(tk.Tk):
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=10)
 
-        self.logo = ImageTk.PhotoImage(Image.open(self.resource_path("file-icon.png")).resize((50, 50)))
+        self.logo = ImageTk.PhotoImage(Image.open(self.resource_path("file-icon1.png")).resize((50, 50)))
         logo_label = ttk.Label(title_frame, image=self.logo)
         logo_label.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -83,12 +86,16 @@ class FileSharingApp(tk.Tk):
         toggle_visibility_button = ttk.Button(file_controls, text="Toggle Visibility", command=self.toggle_folder_visibility, style="Accent.TButton")
         toggle_visibility_button.pack(side=tk.LEFT, padx=5)
 
+        delete_button = ttk.Button(file_controls, text="Delete", command=self.delete_item, style="Accent.TButton")
+        delete_button.pack(side=tk.LEFT, padx=5)
+
         self.file_tree = ttk.Treeview(file_frame, columns=("Type", "Visibility"), show="tree headings")
         self.file_tree.heading("Type", text="Type")
         self.file_tree.heading("Visibility", text="Visibility")
         self.file_tree.column("Type", width=100, anchor="center")
         self.file_tree.column("Visibility", width=100, anchor="center")
         self.file_tree.pack(pady=10, fill=tk.BOTH, expand=True)
+        self.file_tree.bind("<Double-1>", self.on_item_double_click)
 
         # Devices tab
         devices_frame = ttk.Frame(self.notebook)
@@ -130,6 +137,7 @@ class FileSharingApp(tk.Tk):
         self.mode_switch.config(text="Public Mode" if self.public_mode else "Private Mode")
         self.animate_mode_change()
         messagebox.showinfo("Mode Changed", f"Device is now {'Public' if self.public_mode else 'Private'}.")
+        self.update_file_tree()
 
     def animate_mode_change(self):
         for i in range(5):
@@ -168,15 +176,20 @@ class FileSharingApp(tk.Tk):
             return
 
         folder_name = self.file_tree.item(selected[0])['text']
-        if not os.path.isdir(os.path.join(self.shared_directory, folder_name)):
+        folder_path = os.path.join(self.shared_directory, folder_name)
+        if not os.path.isdir(folder_path):
             messagebox.showwarning("Add to Folder", "Please select a folder, not a file.")
             return
+
+        if not self.public_mode and not self.folders[folder_name]["public"]:
+            if not self.check_private_access():
+                return
 
         files = filedialog.askopenfilenames(title="Select Files to Add")
         if files:
             for file_path in files:
                 file_name = os.path.basename(file_path)
-                dest_path = os.path.join(self.shared_directory, folder_name, file_name)
+                dest_path = os.path.join(folder_path, file_name)
                 shutil.copy2(file_path, dest_path)
             self.update_file_tree()
             messagebox.showinfo("Files Added", f"{len(files)} file(s) have been added to '{folder_name}'!")
@@ -204,11 +217,52 @@ class FileSharingApp(tk.Tk):
             item_path = os.path.join(self.shared_directory, item)
             if os.path.isdir(item_path):
                 visibility = "Public" if self.folders.get(item, {}).get("public", True) else "Private"
-                self.file_tree.insert("", "end", text=item, values=("Folder", visibility))
-                for file in os.listdir(item_path):
-                    self.file_tree.insert(item, "end", text=file, values=("File", ""))
+                folder_id = self.file_tree.insert("", "end", text=item, values=("Folder", visibility))
+                if self.public_mode or self.folders.get(item, {}).get("public", True) or self.check_private_access():
+                    try:
+                        for file in os.listdir(item_path):
+                            self.file_tree.insert(folder_id, "end", text=file, values=("File", ""))
+                    except Exception as e:
+                        logging.error(f"Error inserting files for folder {item}: {str(e)}")
             else:
                 self.file_tree.insert("", "end", text=item, values=("File", "Public"))
+        logging.info("File tree updated successfully")
+
+    def on_item_double_click(self, event):
+        item = self.file_tree.selection()[0]
+        item_type = self.file_tree.item(item, "values")[0]
+        if item_type == "File":
+            file_path = os.path.join(self.shared_directory, self.file_tree.item(item, "text"))
+            os.startfile(file_path)
+
+    def delete_item(self):
+        selected = self.file_tree.selection()
+        if not selected:
+            messagebox.showwarning("Delete", "Please select an item to delete.")
+            return
+
+        item = selected[0]
+        item_name = self.file_tree.item(item, "text")
+        item_path = os.path.join(self.shared_directory, item_name)
+
+        if os.path.isdir(item_path):
+            if not self.public_mode and not self.folders[item_name]["public"]:
+                if not self.check_private_access():
+                    return
+            if messagebox.askyesno("Delete Folder", f"Are you sure you want to delete the folder '{item_name}' and all its contents?"):
+                shutil.rmtree(item_path)
+                del self.folders[item_name]
+        else:
+            parent = self.file_tree.parent(item)
+            if parent:
+                folder_name = self.file_tree.item(parent, "text")
+                if not self.public_mode and not self.folders[folder_name]["public"]:
+                    if not self.check_private_access():
+                        return
+            if messagebox.askyesno("Delete File", f"Are you sure you want to delete the file '{item_name}'?"):
+                os.remove(item_path)
+
+        self.update_file_tree()
 
     def scan_network(self):
         self.devices_list.delete(0, tk.END)
@@ -239,6 +293,14 @@ class FileSharingApp(tk.Tk):
         self.history_list.delete(0, tk.END)
         for entry in self.sharing_history:
             self.history_list.insert(tk.END, entry)
+
+    def check_private_access(self):
+        client_ip = socket.gethostbyname(socket.gethostname())
+        if client_ip in self.private_devices:
+            return True
+        else:
+            messagebox.showerror("Access Denied", "You don't have permission to access this private folder.")
+            return False
 
     @staticmethod
     def resource_path(relative_path):
