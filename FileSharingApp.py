@@ -45,7 +45,7 @@ class FileSharingApp(tk.Tk):
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=10)
 
-        self.logo = ImageTk.PhotoImage(Image.open(self.resource_path("file-icon1.png")).resize((50, 50)))
+        self.logo = ImageTk.PhotoImage(Image.open(self.resource_path("file-icon.png")).resize((50, 50)))
         logo_label = ttk.Label(title_frame, image=self.logo)
         logo_label.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -169,6 +169,11 @@ class FileSharingApp(tk.Tk):
             else:
                 messagebox.showerror("Error", f"Folder '{folder_name}' already exists!")
 
+    def ensure_folder_tracked(self, folder_name):
+        if folder_name not in self.folders:
+            self.folders[folder_name] = {"public": True, "files": []}
+            logging.info(f"Added missing folder to tracking: {folder_name}")
+
     def add_to_folder(self):
         selected = self.file_tree.selection()
         if not selected:
@@ -202,8 +207,9 @@ class FileSharingApp(tk.Tk):
 
         item_name = self.file_tree.item(selected[0])['text']
         item_path = os.path.join(self.shared_directory, item_name)
-        
+    
         if os.path.isdir(item_path):
+            self.ensure_folder_tracked(item_name)
             self.folders[item_name]["public"] = not self.folders[item_name]["public"]
             visibility = "Public" if self.folders[item_name]["public"] else "Private"
             self.update_file_tree()
@@ -212,18 +218,18 @@ class FileSharingApp(tk.Tk):
             messagebox.showwarning("Toggle Visibility", "Please select a folder, not a file.")
 
     def update_file_tree(self):
+        logging.info(f"Updating file tree. Shared directory contents: {os.listdir(self.shared_directory)}")
+        logging.info(f"Current folders: {self.folders}")
         self.file_tree.delete(*self.file_tree.get_children())
         for item in os.listdir(self.shared_directory):
             item_path = os.path.join(self.shared_directory, item)
             if os.path.isdir(item_path):
-                visibility = "Public" if self.folders.get(item, {}).get("public", True) else "Private"
+                self.ensure_folder_tracked(item)
+                visibility = "Public" if self.folders[item]["public"] else "Private"
                 folder_id = self.file_tree.insert("", "end", text=item, values=("Folder", visibility))
-                if self.public_mode or self.folders.get(item, {}).get("public", True) or self.check_private_access():
-                    try:
-                        for file in os.listdir(item_path):
-                            self.file_tree.insert(folder_id, "end", text=file, values=("File", ""))
-                    except Exception as e:
-                        logging.error(f"Error inserting files for folder {item}: {str(e)}")
+                if self.public_mode or self.folders[item]["public"] or self.check_private_access():
+                    for file in os.listdir(item_path):
+                        self.file_tree.insert(folder_id, "end", text=file, values=("File", ""))
             else:
                 self.file_tree.insert("", "end", text=item, values=("File", "Public"))
         logging.info("File tree updated successfully")
