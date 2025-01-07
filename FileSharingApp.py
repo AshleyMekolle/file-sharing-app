@@ -9,6 +9,7 @@ import sv_ttk
 import datetime
 import sys
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -28,6 +29,8 @@ class FileSharingApp(tk.Tk):
         self.sharing_history = []
         self.folders = {}
         self.current_folder = None
+        self.host = socket.gethostbyname(socket.gethostname())
+        self.port = 5000
 
         # Create a directory for shared files
         self.shared_directory = os.path.join(os.path.expanduser("~"), "SharedFiles")
@@ -35,6 +38,7 @@ class FileSharingApp(tk.Tk):
             os.makedirs(self.shared_directory)
 
         self.create_widgets()
+        self.start_file_server()
 
     def create_widgets(self):
         # Main frame
@@ -104,8 +108,12 @@ class FileSharingApp(tk.Tk):
         scan_button = ttk.Button(devices_frame, text="Scan Network", command=self.scan_network, style="Accent.TButton")
         scan_button.pack(pady=10)
 
+        manual_add_button = ttk.Button(devices_frame, text="Add Device Manually", command=self.add_manual_device, style="Accent.TButton")
+        manual_add_button.pack(pady=5)
+
         self.devices_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
         self.devices_list.pack(pady=10, fill=tk.BOTH, expand=True)
+        self.devices_list.bind('<<ListboxSelect>>', self.on_device_select)
 
         # Private devices tab
         private_frame = ttk.Frame(self.notebook)
@@ -273,19 +281,34 @@ class FileSharingApp(tk.Tk):
     def scan_network(self):
         self.devices_list.delete(0, tk.END)
         self.devices_list.insert(tk.END, "🔍 Scanning for devices...")
-        
+    
         def scan():
             self.devices_list.delete(0, tk.END)
             host = socket.gethostbyname(socket.gethostname())
             subnet = ".".join(host.split(".")[:-1])
-            for i in range(1, 255):
-                ip = f"{subnet}.{i}"
+            
+            def check_ip(ip):
                 try:
-                    socket.gethostbyaddr(ip)
-                    self.devices_list.insert(tk.END, f"💻 {ip}")
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1)
+                        s.connect((ip, self.port))
+                        self.devices_list.insert(tk.END, f"💻 {ip}")
                 except:
                     pass
-        
+
+            threads = []
+            for i in range(1, 255):
+                ip = f"{subnet}.{i}"
+                thread = threading.Thread(target=check_ip, args=(ip,))
+                thread.start()
+                threads.append(thread)
+
+            for thread in threads:
+                thread.join()
+
+            if self.devices_list.size() == 0:
+                self.devices_list.insert(tk.END, "No devices found")
+
         threading.Thread(target=scan).start()
 
     def add_private_device(self):
@@ -318,6 +341,85 @@ class FileSharingApp(tk.Tk):
             base_path = os.path.abspath(".")
 
         return os.path.join(base_path, relative_path)
+
+    def share_file_list(self):
+        file_list = []
+        for item in os.listdir(self.shared_directory):
+            item_path = os.path.join(self.shared_directory, item)
+            if os.path.isdir(item_path):
+                if self.folders[item]["public"]:
+                    file_list.append({"name": item, "type": "folder", "public": True})
+                    for file in os.listdir(item_path):
+                        file_list.append({"name": f"{item}/{file}", "type": "file", "public": True})
+            else:
+                file_list.append({"name": item, "type": "file", "public": True})
+        
+        return json.dumps(file_list)
+
+    def request_file_list(self, ip):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.connect((ip, self.port))
+                s.sendall(b"REQUEST_FILE_LIST")
+                data = s.recv(4096)
+                return json.loads(data.decode())
+            except:
+                return None
+
+    def start_file_server(self):
+        def serve():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((self.host, self.port))
+                s.listen()
+                while True:
+                    conn, addr = s.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        if data == b"REQUEST_FILE_LIST":
+                            file_list = self.share_file_list()
+                            conn.sendall(file_list.encode())
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    def on_device_select(self, event):
+        selected_indices = self.devices_list.curselection()
+        if selected_indices:
+            selected_ip = self.devices_list.get(selected_indices[0]).split()[-1]
+            file_list = self.request_file_list(selected_ip)
+            if file_list:
+                self.display_remote_files(file_list)
+            else:
+                messagebox.showerror("Error", f"Unable to retrieve file list from {selected_ip}")
+
+    def display_remote_files(self, file_list):
+        remote_files_window = tk.Toplevel(self)
+        remote_files_window.title("Remote Files")
+        remote_files_window.geometry("400x300")
+
+        remote_files_tree = ttk.Treeview(remote_files_window, columns=("Type", "Visibility"), show="tree headings")
+        remote_files_tree.heading("Type", text="Type")
+        remote_files_tree.heading("Visibility", text="Visibility")
+        remote_files_tree.column("Type", width=100, anchor="center")
+        remote_files_tree.column("Visibility", width=100, anchor="center")
+        remote_files_tree.pack(pady=10, fill=tk.BOTH, expand=True)
+
+        for item in file_list:
+            if item["type"] == "folder":
+                folder_id = remote_files_tree.insert("", "end", text=item["name"], values=("Folder", "Public" if item["public"] else "Private"))
+            else:
+                if "/" in item["name"]:
+                    folder, file = item["name"].split("/", 1)
+                    folder_id = remote_files_tree.insert("", "end", text=folder, values=("Folder", "Public"))
+                    remote_files_tree.insert(folder_id, "end", text=file, values=("File", "Public"))
+                else:
+                    remote_files_tree.insert("", "end", text=item["name"], values=("File", "Public"))
+
+    def add_manual_device(self):
+        ip = simpledialog.askstring("Add Device", "Enter the IP address of the device:")
+        if ip:
+            self.devices_list.insert(tk.END, f"💻 {ip}")
+            messagebox.showinfo("Device Added", f"Device with IP {ip} has been added to the list.")
+
 
 if __name__ == "__main__":
     app = FileSharingApp()
