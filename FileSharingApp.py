@@ -34,9 +34,7 @@ class FileSharingApp(tk.Tk):
         self.folders = {}
         self.current_folder = None
         self.host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
-        self.port = 5000  # Starting port
-        self.udp_port = 5001
-        self.peers = set()
+        self.port = 5000
 
         # Create a directory for shared files
         self.shared_directory = os.path.join(os.path.expanduser("~"), "SharedFiles")
@@ -45,8 +43,6 @@ class FileSharingApp(tk.Tk):
 
         self.create_widgets()
         self.start_file_server()
-        self.start_udp_server()
-        self.start_peer_discovery()
 
     def create_widgets(self):
         # Main frame
@@ -113,15 +109,37 @@ class FileSharingApp(tk.Tk):
         devices_frame = ttk.Frame(self.notebook)
         self.notebook.add(devices_frame, text="📡 Devices")
 
-        refresh_peers_button = ttk.Button(devices_frame, text="Refresh Peers", command=self.refresh_peers, style="Accent.TButton")
-        refresh_peers_button.pack(pady=10)
+        scan_button = ttk.Button(devices_frame, text="Scan Network", command=self.scan_network, style="Accent.TButton")
+        scan_button.pack(pady=10)
+
+        manual_add_button = ttk.Button(devices_frame, text="Add Device Manually", command=self.add_manual_device, style="Accent.TButton")
+        manual_add_button.pack(pady=5)
 
         show_ip_button = ttk.Button(devices_frame, text="Show Current IP", command=self.show_current_ip, style="Accent.TButton")
         show_ip_button.pack(pady=5)
 
-        self.peers_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
-        self.peers_list.pack(pady=10, fill=tk.BOTH, expand=True)
-        self.peers_list.bind('<<ListboxSelect>>', self.on_peer_select)
+        test_connection_button = ttk.Button(devices_frame, text="Test Connection", command=self.test_connection, style="Accent.TButton")
+        test_connection_button.pack(pady=5)
+
+        self.devices_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
+        self.devices_list.pack(pady=10, fill=tk.BOTH, expand=True)
+        self.devices_list.bind('<<ListboxSelect>>', self.on_device_select)
+
+        # Private devices tab
+        private_frame = ttk.Frame(self.notebook)
+        self.notebook.add(private_frame, text="🔒 Private")
+
+        self.private_list = tk.Listbox(private_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
+        self.private_list.pack(pady=10, fill=tk.BOTH, expand=True)
+
+        device_entry_frame = ttk.Frame(private_frame)
+        device_entry_frame.pack(fill=tk.X, pady=5)
+
+        self.device_ip_entry = ttk.Entry(device_entry_frame, font=("Segoe UI", 12), width=30)
+        self.device_ip_entry.pack(side=tk.LEFT, padx=5)
+
+        add_device_button = ttk.Button(device_entry_frame, text="Add Device", command=self.add_private_device, style="Accent.TButton")
+        add_device_button.pack(side=tk.LEFT)
 
         # History tab
         history_frame = ttk.Frame(self.notebook)
@@ -270,6 +288,46 @@ class FileSharingApp(tk.Tk):
 
         self.update_file_tree()
 
+    def scan_network(self):
+        self.devices_list.delete(0, tk.END)
+        self.devices_list.insert(tk.END, "🔍 Scanning for devices...")
+    
+        def scan():
+            self.devices_list.delete(0, tk.END)
+            host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
+            subnet = ".".join(host.split(".")[:-1])
+            
+            def check_ip(ip):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1)
+                        s.connect((ip, self.port))
+                        self.devices_list.insert(tk.END, f"💻 {ip}")
+                except:
+                    pass
+
+            threads = []
+            for i in range(1, 255):
+                ip = f"{subnet}.{i}"
+                thread = threading.Thread(target=check_ip, args=(ip,))
+                thread.start()
+                threads.append(thread)
+
+            for thread in threads:
+                thread.join()
+
+            if self.devices_list.size() == 0:
+                self.devices_list.insert(tk.END, "No devices found")
+
+        threading.Thread(target=scan).start()
+
+    def add_private_device(self):
+        device_ip = self.device_ip_entry.get()
+        if device_ip:
+            self.private_devices.add(device_ip)
+            self.private_list.insert(tk.END, f"🔒 {device_ip}")
+            self.device_ip_entry.delete(0, tk.END)
+
     def update_history(self):
         self.history_list.delete(0, tk.END)
         for entry in self.sharing_history:
@@ -325,73 +383,33 @@ class FileSharingApp(tk.Tk):
 
     def start_file_server(self):
         def serve():
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    port = self.find_free_port(self.port)
-                    if port is None:
-                        logging.error("No free ports available")
-                        return
-                    s.bind((self.host, port))
-                    s.listen()
-                    logging.info(f"File server started on {self.host}:{port}")
-                    while True:
-                        conn, addr = s.accept()
-                        logging.info(f"Accepted connection from {addr}")
-                        with conn:
-                            try:
-                                data = conn.recv(1024)
-                                if data == b"REQUEST_FILE_LIST":
-                                    file_list = self.share_file_list()
-                                    conn.sendall(file_list.encode())
-                                elif data.startswith(b"DOWNLOAD:"):
-                                    item_name = data[9:].decode()
-                                    self.handle_download(conn, item_name)
-                            except Exception as e:
-                                logging.error(f"Error handling connection from {addr}: {str(e)}")
-            except Exception as e:
-                logging.error(f"Error starting file server: {str(e)}")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((self.host, self.port))
+                s.listen()
+                logging.info(f"File server started on {self.host}:{self.port}")
+                while True:
+                    conn, addr = s.accept()
+                    logging.info(f"Accepted connection from {addr}")
+                    with conn:
+                        try:
+                            data = conn.recv(1024)
+                            if data == b"REQUEST_FILE_LIST":
+                                file_list = self.share_file_list()
+                                conn.sendall(file_list.encode())
+                            elif data.startswith(b"DOWNLOAD:"):
+                                item_name = data[9:].decode()
+                                self.handle_download(conn, item_name)
+                            elif data == b"TEST_CONNECTION":
+                                conn.sendall(b"CONNECTION_OK")
+                        except Exception as e:
+                            logging.error(f"Error handling connection from {addr}: {str(e)}")
 
         threading.Thread(target=serve, daemon=True).start()
 
-    def start_udp_server(self):
-        def serve():
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.bind(('', self.udp_port))
-                logging.info(f"UDP server started on port {self.udp_port}")
-                while True:
-                    data, addr = s.recvfrom(1024)
-                    if data == b"DISCOVER":
-                        s.sendto(b"HELLO", addr)
-                        self.peers.add(addr[0])
-                        self.update_peers_list()
-
-        threading.Thread(target=serve, daemon=True).start()
-
-    def start_peer_discovery(self):
-        def discover():
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                s.settimeout(1)
-                while True:
-                    s.sendto(b"DISCOVER", ('<broadcast>', self.udp_port))
-                    time.sleep(5)  # Discover every 5 seconds
-
-        threading.Thread(target=discover, daemon=True).start()
-
-    def refresh_peers(self):
-        self.peers = set()
-        self.update_peers_list()
-        messagebox.showinfo("Refresh Peers", "Peer list refreshed. Wait a few seconds for discovery.")
-
-    def update_peers_list(self):
-        self.peers_list.delete(0, tk.END)
-        for peer in self.peers:
-            self.peers_list.insert(tk.END, f"💻 {peer}")
-
-    def on_peer_select(self, event):
-        selected_indices = self.peers_list.curselection()
+    def on_device_select(self, event):
+        selected_indices = self.devices_list.curselection()
         if selected_indices:
-            selected_ip = self.peers_list.get(selected_indices[0]).split()[-1]
+            selected_ip = self.devices_list.get(selected_indices[0]).split()[-1]
             file_list = self.request_file_list(selected_ip)
             if file_list:
                 self.display_remote_files(file_list, selected_ip)
@@ -513,6 +531,12 @@ class FileSharingApp(tk.Tk):
                         break
                     conn.sendall(chunk)
 
+    def add_manual_device(self):
+        ip = simpledialog.askstring("Add Device", "Enter the IP address of the device:")
+        if ip:
+            self.devices_list.insert(tk.END, f"💻 {ip}")
+            messagebox.showinfo("Device Added", f"Device with IP {ip} has been added to the list.")
+
     def get_wifi_ip(self):
         import subprocess
         import re
@@ -543,16 +567,23 @@ class FileSharingApp(tk.Tk):
         ip = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
         messagebox.showinfo("Current IP", f"Your current IP address is: {ip}")
 
-    def find_free_port(self, start_port):
-        for port in range(start_port, 65536):
+    def test_connection(self):
+        ip = simpledialog.askstring("Test Connection", "Enter the IP address to test:")
+        if ip:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.bind((self.host, port))
-                s.close()
-                return port
-            except OSError:
-                continue
-        return None
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5)
+                    s.connect((ip, self.port))
+                    s.sendall(b"TEST_CONNECTION")
+                    response = s.recv(1024)
+                    if response == b"CONNECTION_OK":
+                        messagebox.showinfo("Connection Test", f"Successfully connected to {ip}")
+                    else:
+                        messagebox.showerror("Connection Test", f"Received unexpected response from {ip}")
+            except socket.timeout:
+                messagebox.showerror("Connection Test", f"Connection to {ip} timed out")
+            except Exception as e:
+                messagebox.showerror("Connection Test", f"Failed to connect to {ip}: {str(e)}")
 
 if __name__ == "__main__":
     app = FileSharingApp()
