@@ -10,6 +10,10 @@ import datetime
 import sys
 import logging
 import json
+import struct
+import time
+import select
+import zipfile
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -29,7 +33,7 @@ class FileSharingApp(tk.Tk):
         self.sharing_history = []
         self.folders = {}
         self.current_folder = None
-        self.host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname()) # Updated line
+        self.host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
         self.port = 5000
 
         # Create a directory for shared files
@@ -111,8 +115,8 @@ class FileSharingApp(tk.Tk):
         manual_add_button = ttk.Button(devices_frame, text="Add Device Manually", command=self.add_manual_device, style="Accent.TButton")
         manual_add_button.pack(pady=5)
 
-        show_ip_button = ttk.Button(devices_frame, text="Show Current IP", command=self.show_current_ip, style="Accent.TButton") # Added button
-        show_ip_button.pack(pady=5) # Added button
+        show_ip_button = ttk.Button(devices_frame, text="Show Current IP", command=self.show_current_ip, style="Accent.TButton")
+        show_ip_button.pack(pady=5)
 
         self.devices_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
         self.devices_list.pack(pady=10, fill=tk.BOTH, expand=True)
@@ -287,7 +291,7 @@ class FileSharingApp(tk.Tk):
     
         def scan():
             self.devices_list.delete(0, tk.END)
-            host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname()) # Updated line
+            host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
             subnet = ".".join(host.split(".")[:-1])
             
             def check_ip(ip):
@@ -381,6 +385,10 @@ class FileSharingApp(tk.Tk):
                         if data == b"REQUEST_FILE_LIST":
                             file_list = self.share_file_list()
                             conn.sendall(file_list.encode())
+                        elif data.startswith(b"DOWNLOAD:"):
+                            item_name = data[9:].decode()
+                            self.handle_download(conn, item_name)
+
 
         threading.Thread(target=serve, daemon=True).start()
 
@@ -390,14 +398,14 @@ class FileSharingApp(tk.Tk):
             selected_ip = self.devices_list.get(selected_indices[0]).split()[-1]
             file_list = self.request_file_list(selected_ip)
             if file_list:
-                self.display_remote_files(file_list)
+                self.display_remote_files(file_list, selected_ip)
             else:
                 messagebox.showerror("Error", f"Unable to retrieve file list from {selected_ip}")
 
-    def display_remote_files(self, file_list):
+    def display_remote_files(self, file_list, remote_ip):
         remote_files_window = tk.Toplevel(self)
-        remote_files_window.title("Remote Files")
-        remote_files_window.geometry("400x300")
+        remote_files_window.title(f"Remote Files - {remote_ip}")
+        remote_files_window.geometry("500x400")
 
         remote_files_tree = ttk.Treeview(remote_files_window, columns=("Type", "Visibility"), show="tree headings")
         remote_files_tree.heading("Type", text="Type")
@@ -416,6 +424,95 @@ class FileSharingApp(tk.Tk):
                     remote_files_tree.insert(folder_id, "end", text=file, values=("File", "Public"))
                 else:
                     remote_files_tree.insert("", "end", text=item["name"], values=("File", "Public"))
+
+        download_button = ttk.Button(remote_files_window, text="Download Selected", command=lambda: self.download_selected(remote_files_tree, remote_ip))
+        download_button.pack(pady=10)
+
+    def download_selected(self, tree, remote_ip):
+        selected_items = tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Download", "Please select items to download.")
+            return
+
+        save_path = filedialog.askdirectory(title="Select Download Location")
+        if not save_path:
+            return
+
+        for item in selected_items:
+            item_text = tree.item(item, "text")
+            item_type = tree.item(item, "values")[0]
+            self.request_download(remote_ip, item_text, item_type, save_path)
+
+    def request_download(self, remote_ip, item_name, item_type, save_path):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.connect((remote_ip, self.port))
+                s.sendall(f"DOWNLOAD:{item_name}".encode())
+                
+                file_size = struct.unpack("!Q", s.recv(8))[0]
+                received_size = 0
+                
+                if item_type == "Folder":
+                    zip_path = os.path.join(save_path, f"{item_name}.zip")
+                    with open(zip_path, "wb") as f:
+                        while received_size < file_size:
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            received_size += len(chunk)
+                    
+                    # Extract the zip file
+                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(save_path)
+                    os.remove(zip_path)
+                else:
+                    file_path = os.path.join(save_path, item_name)
+                    with open(file_path, "wb") as f:
+                        while received_size < file_size:
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            received_size += len(chunk)
+                
+                messagebox.showinfo("Download Complete", f"{item_name} has been downloaded successfully.")
+            except Exception as e:
+                messagebox.showerror("Download Error", f"Failed to download {item_name}: {str(e)}")
+
+    def handle_download(self, conn, item_name):
+        item_path = os.path.join(self.shared_directory, item_name)
+        if os.path.isdir(item_path):
+            # Create a temporary zip file
+            zip_path = os.path.join(self.shared_directory, f"{item_name}.zip")
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(item_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, item_path)
+                        zipf.write(file_path, arcname)
+            
+            file_size = os.path.getsize(zip_path)
+            conn.sendall(struct.pack("!Q", file_size))
+            
+            with open(zip_path, "rb") as f:
+                while True:
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+            
+            os.remove(zip_path)
+        else:
+            file_size = os.path.getsize(item_path)
+            conn.sendall(struct.pack("!Q", file_size))
+            
+            with open(item_path, "rb") as f:
+                while True:
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
 
     def add_manual_device(self):
         ip = simpledialog.askstring("Add Device", "Enter the IP address of the device:")
