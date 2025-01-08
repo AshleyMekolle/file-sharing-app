@@ -15,7 +15,7 @@ import time
 import select
 import zipfile
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class FileSharingApp(tk.Tk):
     def __init__(self):
@@ -117,6 +117,9 @@ class FileSharingApp(tk.Tk):
 
         show_ip_button = ttk.Button(devices_frame, text="Show Current IP", command=self.show_current_ip, style="Accent.TButton")
         show_ip_button.pack(pady=5)
+
+        test_connection_button = ttk.Button(devices_frame, text="Test Connection", command=self.test_connection, style="Accent.TButton")
+        test_connection_button.pack(pady=5)
 
         self.devices_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
         self.devices_list.pack(pady=10, fill=tk.BOTH, expand=True)
@@ -366,11 +369,16 @@ class FileSharingApp(tk.Tk):
     def request_file_list(self, ip):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
+                s.settimeout(5)  # Set a timeout of 5 seconds
                 s.connect((ip, self.port))
                 s.sendall(b"REQUEST_FILE_LIST")
                 data = s.recv(4096)
                 return json.loads(data.decode())
-            except:
+            except socket.timeout:
+                logging.error(f"Connection to {ip} timed out")
+                return None
+            except Exception as e:
+                logging.error(f"Error requesting file list from {ip}: {str(e)}")
                 return None
 
     def start_file_server(self):
@@ -378,17 +386,23 @@ class FileSharingApp(tk.Tk):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((self.host, self.port))
                 s.listen()
+                logging.info(f"File server started on {self.host}:{self.port}")
                 while True:
                     conn, addr = s.accept()
+                    logging.info(f"Accepted connection from {addr}")
                     with conn:
-                        data = conn.recv(1024)
-                        if data == b"REQUEST_FILE_LIST":
-                            file_list = self.share_file_list()
-                            conn.sendall(file_list.encode())
-                        elif data.startswith(b"DOWNLOAD:"):
-                            item_name = data[9:].decode()
-                            self.handle_download(conn, item_name)
-
+                        try:
+                            data = conn.recv(1024)
+                            if data == b"REQUEST_FILE_LIST":
+                                file_list = self.share_file_list()
+                                conn.sendall(file_list.encode())
+                            elif data.startswith(b"DOWNLOAD:"):
+                                item_name = data[9:].decode()
+                                self.handle_download(conn, item_name)
+                            elif data == b"TEST_CONNECTION":
+                                conn.sendall(b"CONNECTION_OK")
+                        except Exception as e:
+                            logging.error(f"Error handling connection from {addr}: {str(e)}")
 
         threading.Thread(target=serve, daemon=True).start()
 
@@ -446,6 +460,7 @@ class FileSharingApp(tk.Tk):
     def request_download(self, remote_ip, item_name, item_type, save_path):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
+                s.settimeout(10)  # Set a timeout of 10 seconds
                 s.connect((remote_ip, self.port))
                 s.sendall(f"DOWNLOAD:{item_name}".encode())
                 
@@ -477,6 +492,8 @@ class FileSharingApp(tk.Tk):
                             received_size += len(chunk)
                 
                 messagebox.showinfo("Download Complete", f"{item_name} has been downloaded successfully.")
+            except socket.timeout:
+                messagebox.showerror("Download Error", f"Connection to {remote_ip} timed out")
             except Exception as e:
                 messagebox.showerror("Download Error", f"Failed to download {item_name}: {str(e)}")
 
@@ -550,6 +567,23 @@ class FileSharingApp(tk.Tk):
         ip = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
         messagebox.showinfo("Current IP", f"Your current IP address is: {ip}")
 
+    def test_connection(self):
+        ip = simpledialog.askstring("Test Connection", "Enter the IP address to test:")
+        if ip:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5)
+                    s.connect((ip, self.port))
+                    s.sendall(b"TEST_CONNECTION")
+                    response = s.recv(1024)
+                    if response == b"CONNECTION_OK":
+                        messagebox.showinfo("Connection Test", f"Successfully connected to {ip}")
+                    else:
+                        messagebox.showerror("Connection Test", f"Received unexpected response from {ip}")
+            except socket.timeout:
+                messagebox.showerror("Connection Test", f"Connection to {ip} timed out")
+            except Exception as e:
+                messagebox.showerror("Connection Test", f"Failed to connect to {ip}: {str(e)}")
 
 if __name__ == "__main__":
     app = FileSharingApp()
