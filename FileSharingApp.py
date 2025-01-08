@@ -29,7 +29,7 @@ class FileSharingApp(tk.Tk):
         self.sharing_history = []
         self.folders = {}
         self.current_folder = None
-        self.host = socket.gethostbyname(socket.gethostname())
+        self.host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname()) # Updated line
         self.port = 5000
 
         # Create a directory for shared files
@@ -110,6 +110,9 @@ class FileSharingApp(tk.Tk):
 
         manual_add_button = ttk.Button(devices_frame, text="Add Device Manually", command=self.add_manual_device, style="Accent.TButton")
         manual_add_button.pack(pady=5)
+
+        show_ip_button = ttk.Button(devices_frame, text="Show Current IP", command=self.show_current_ip, style="Accent.TButton") # Added button
+        show_ip_button.pack(pady=5) # Added button
 
         self.devices_list = tk.Listbox(devices_frame, font=("Segoe UI", 12), bg="#2c2c2c", fg="white", selectbackground="#007acc")
         self.devices_list.pack(pady=10, fill=tk.BOTH, expand=True)
@@ -284,7 +287,7 @@ class FileSharingApp(tk.Tk):
     
         def scan():
             self.devices_list.delete(0, tk.END)
-            host = socket.gethostbyname(socket.gethostname())
+            host = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname()) # Updated line
             subnet = ".".join(host.split(".")[:-1])
             
             def check_ip(ip):
@@ -419,6 +422,36 @@ class FileSharingApp(tk.Tk):
         if ip:
             self.devices_list.insert(tk.END, f"💻 {ip}")
             messagebox.showinfo("Device Added", f"Device with IP {ip} has been added to the list.")
+
+    def get_wifi_ip(self):
+        import subprocess
+        import re
+
+        try:
+            # For Windows
+            if os.name == 'nt':
+                output = subprocess.check_output(['ipconfig']).decode('utf-8')
+                wifi_section = re.search(r'Wireless LAN adapter WiFi:(.*?)(\n\n|\Z)', output, re.DOTALL)
+                if wifi_section:
+                    ip_match = re.search(r'IPv4 Address[.\s]+: ([^\s]+)', wifi_section.group(1))
+                    if ip_match:
+                        return ip_match.group(1)
+            # For Unix-based systems (Linux, macOS)
+            else:
+                output = subprocess.check_output(['ifconfig']).decode('utf-8')
+                wifi_section = re.search(r'(wlan0|en0):(.*?)(\n\n|\Z)', output, re.DOTALL)
+                if wifi_section:
+                    ip_match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+)', wifi_section.group(2))
+                    if ip_match:
+                        return ip_match.group(1)
+        except Exception as e:
+            logging.error(f"Error getting Wi-Fi IP: {e}")
+    
+        return None
+
+    def show_current_ip(self):
+        ip = self.get_wifi_ip() or socket.gethostbyname(socket.gethostname())
+        messagebox.showinfo("Current IP", f"Your current IP address is: {ip}")
 
 
 if __name__ == "__main__":
