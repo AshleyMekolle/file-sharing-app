@@ -4,15 +4,19 @@ import json
 import struct
 import zipfile
 import os
-from tkinter import messagebox, simpledialog
+import tkinter as tk
+from tkinter import messagebox, simpledialog, filedialog
 from utils import get_wifi_ip, scan_network
 
 class Networking:
     def __init__(self, file_ops):
         self.file_ops = file_ops
-        self.host = get_wifi_ip() or socket.gethostbyname(socket.gethostname())
+        self.host = get_wifi_ip()
+        if not self.host:
+            self.host = socket.gethostbyname(socket.gethostname())
+            print(f"Warning: Could not get WiFi IP, using fallback IP: {self.host}")
         self.port = 5000
-        self.devices_list = None  
+        self.devices_list = None  # Will be set by GUI
 
     def start_file_server(self):
         def serve():
@@ -42,25 +46,24 @@ class Networking:
     def scan_network(self):
         self.devices_list.delete(0, tk.END)
         self.devices_list.insert(tk.END, "🔍 Scanning for devices...")
+        self.devices_list.update()
 
         def scan():
             self.devices_list.delete(0, tk.END)
-            ip = get_wifi_ip()
-            if ip:
-                active_hosts = scan_network(ip)
-                for host in active_hosts:
-                    if host != ip:  # Don't include our own IP
-                        self.devices_list.insert(tk.END, f"💻 {host}")
-        
+            if self.host:
+                active_hosts = scan_network(self.host)
+                for host, hostname in active_hosts:
+                    self.devices_list.insert(tk.END, f"💻 {host} ({hostname})")
+            
             if self.devices_list.size() == 0:
                 self.devices_list.insert(tk.END, "No devices found")
 
-        threading.Thread(target=scan).start()
+        threading.Thread(target=scan, daemon=True).start()
 
     def on_device_select(self, event):
         selected_indices = self.devices_list.curselection()
         if selected_indices:
-            selected_ip = self.devices_list.get(selected_indices[0]).split()[-1]
+            selected_ip = self.devices_list.get(selected_indices[0]).split()[1]
             file_list = self.request_file_list(selected_ip)
             if file_list:
                 self.display_remote_files(file_list, selected_ip)
@@ -83,8 +86,45 @@ class Networking:
                 return None
 
     def display_remote_files(self, file_list, remote_ip):
-        
-        pass
+        remote_files_window = tk.Toplevel()
+        remote_files_window.title(f"Files on {remote_ip}")
+        remote_files_window.geometry("400x300")
+
+        listbox = tk.Listbox(remote_files_window)
+        listbox.pack(fill=tk.BOTH, expand=True)
+
+        for file in file_list:
+            listbox.insert(tk.END, file['name'])
+
+        download_button = tk.Button(remote_files_window, text="Download Selected", command=lambda: self.download_selected(listbox, remote_ip))
+        download_button.pack()
+
+    def download_selected(self, listbox, remote_ip):
+        selected = listbox.curselection()
+        if selected:
+            file_name = listbox.get(selected[0])
+            self.request_download(remote_ip, file_name)
+
+    def request_download(self, remote_ip, file_name):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.connect((remote_ip, self.port))
+                s.sendall(f"DOWNLOAD:{file_name}".encode())
+                file_size = struct.unpack("!Q", s.recv(8))[0]
+            
+                save_path = filedialog.asksaveasfilename(defaultextension="", initialfile=file_name)
+                if save_path:
+                    with open(save_path, "wb") as f:
+                        remaining = file_size
+                        while remaining:
+                            chunk = s.recv(min(remaining, 4096))
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            remaining -= len(chunk)
+                    messagebox.showinfo("Download Complete", f"{file_name} has been downloaded successfully.")
+            except Exception as e:
+                messagebox.showerror("Download Error", f"Failed to download {file_name}: {str(e)}")
 
     def handle_download(self, conn, item_name):
         item_path = os.path.join(self.file_ops.shared_directory, item_name)

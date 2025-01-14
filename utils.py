@@ -3,27 +3,22 @@ import sys
 import socket
 import subprocess
 import re
-import nmap
-import ipaddress
 
 def get_wifi_ip():
     try:
-        # For Windows
-        if os.name == 'nt':
+        if os.name == 'nt':  # For Windows
             output = subprocess.check_output(['ipconfig']).decode('utf-8')
-            wifi_section = re.search(r'Wireless LAN adapter WiFi:(.*?)(\n\n|\Z)', output, re.DOTALL)
-            if wifi_section:
-                ip_match = re.search(r'IPv4 Address[.\s]+: ([^\s]+)', wifi_section.group(1))
-                if ip_match:
-                    return ip_match.group(1)
-        # For Unix-based systems (Linux, macOS)
-        else:
+            for line in output.split('\n'):
+                if 'IPv4 Address' in line and 'Wi-Fi' in output.split('\n')[output.split('\n').index(line) - 2]:
+                    return line.split(':')[-1].strip()
+        else:  # For Unix-based systems (Linux, macOS)
             output = subprocess.check_output(['ifconfig']).decode('utf-8')
-            wifi_section = re.search(r'(wlan0|en0):(.*?)(\n\n|\Z)', output, re.DOTALL)
-            if wifi_section:
-                ip_match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+)', wifi_section.group(2))
-                if ip_match:
-                    return ip_match.group(1)
+            pattern = r'inet\s+(\d+\.\d+\.\d+\.\d+).*broadcast'
+            for line in output.split('\n'):
+                if 'wlan0' in line or 'en0' in line:  # Common WiFi interface names
+                    match = re.search(pattern, output[output.index(line):])
+                    if match:
+                        return match.group(1)
     except Exception as e:
         print(f"Error getting Wi-Fi IP: {e}")
     
@@ -41,17 +36,22 @@ def resource_path(relative_path):
 
 def scan_network(ip_address):
     try:
-        # Create a network address with subnet mask
-        network = ipaddress.IPv4Network(f"{ip_address}/24", strict=False)
-        
-        nm = nmap.PortScanner()
-        nm.scan(hosts=str(network), arguments='-sn')
-        
+        subnet = '.'.join(ip_address.split('.')[:-1])
         active_hosts = []
-        for host in nm.all_hosts():
-            if nm[host]['status']['state'] == 'up':
-                active_hosts.append(host)
-        
+        for i in range(1, 255):
+            host = f"{subnet}.{i}"
+            if host != ip_address:
+                try:
+                    with socket.create_connection((host, 5000), timeout=0.1) as s:
+                        s.sendall(b"TEST_CONNECTION")
+                        if s.recv(1024) == b"CONNECTION_OK":
+                            try:
+                                hostname = socket.gethostbyaddr(host)[0]
+                            except socket.herror:
+                                hostname = "Unknown"
+                            active_hosts.append((host, hostname))
+                except:
+                    pass
         return active_hosts
     except Exception as e:
         print(f"Error scanning network: {e}")
