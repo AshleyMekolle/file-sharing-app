@@ -6,17 +6,15 @@ import zipfile
 import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
-from utils import get_wifi_ip, scan_network
+from utils import get_wifi_ip
 
 class Networking:
     def __init__(self, file_ops):
         self.file_ops = file_ops
-        self.host = get_wifi_ip()
-        if not self.host:
-            self.host = socket.gethostbyname(socket.gethostname())
-            print(f"Warning: Could not get WiFi IP, using fallback IP: {self.host}")
+        self.host = get_wifi_ip() or socket.gethostbyname(socket.gethostname())
         self.port = 5000
         self.devices_list = None  # Will be set by GUI
+        self.shared_directory = self.file_ops.shared_directory
 
     def start_file_server(self):
         def serve():
@@ -27,43 +25,101 @@ class Networking:
                 while True:
                     conn, addr = s.accept()
                     print(f"Accepted connection from {addr}")
-                    with conn:
-                        try:
-                            data = conn.recv(1024)
-                            if data == b"REQUEST_FILE_LIST":
-                                file_list = self.file_ops.share_file_list()
-                                conn.sendall(file_list.encode())
-                            elif data.startswith(b"DOWNLOAD:"):
-                                item_name = data[9:].decode()
-                                self.handle_download(conn, item_name)
-                            elif data == b"TEST_CONNECTION":
-                                conn.sendall(b"CONNECTION_OK")
-                        except Exception as e:
-                            print(f"Error handling connection from {addr}: {str(e)}")
+                    threading.Thread(target=self.handle_client, args=(conn, addr)).start()
 
         threading.Thread(target=serve, daemon=True).start()
+
+    def handle_client(self, conn, addr):
+        try:
+            data = conn.recv(1024).decode()
+            if data.startswith("REQUEST_FILE_LIST"):
+                file_list = self.file_ops.share_file_list()
+                conn.sendall(json.dumps(file_list).encode())
+            elif data.startswith("DOWNLOAD:"):
+                file_name = data.split(":")[1]
+                self.send_file(conn, file_name)
+            elif data.startswith("UPLOAD:"):
+                file_name = data.split(":")[1]
+                self.receive_file(conn, file_name)
+        except Exception as e:
+            print(f"Error handling connection from {addr}: {str(e)}")
+        finally:
+            conn.close()
+
+    def send_file(self, conn, file_name):
+        file_path = os.path.join(self.shared_directory, file_name)
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            conn.sendall(struct.pack("!Q", file_size))
+            with open(file_path, "rb") as f:
+                while True:
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+            print(f"File {file_name} sent successfully")
+        else:
+            conn.sendall(struct.pack("!Q", 0))  # Send 0 size to indicate file not found
+
+    def receive_file(self, conn, file_name):
+        file_size = struct.unpack("!Q", conn.recv(8))[0]
+        if file_size > 0:
+            file_path = os.path.join(self.shared_directory, file_name)
+            with open(file_path, "wb") as f:
+                remaining = file_size
+                while remaining > 0:
+                    chunk = conn.recv(min(remaining, 4096))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            print(f"File {file_name} received successfully")
+            self.file_ops.update_file_tree()
+        else:
+            print(f"File {file_name} not found on sender's side")
 
     def scan_network(self):
         self.devices_list.delete(0, tk.END)
         self.devices_list.insert(tk.END, "🔍 Scanning for devices...")
-        self.devices_list.update()
 
         def scan():
             self.devices_list.delete(0, tk.END)
-            if self.host:
-                active_hosts = scan_network(self.host)
-                for host, hostname in active_hosts:
-                    self.devices_list.insert(tk.END, f"💻 {host} ({hostname})")
-            
+            network = '.'.join(self.host.split('.')[:-1]) + '.'
+            active_hosts = []
+
+            def check_host(ip):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1)
+                        s.connect((ip, self.port))
+                        return ip
+                except:
+                    return None
+
+            threads = []
+            for i in range(1, 255):
+                ip = network + str(i)
+                thread = threading.Thread(target=lambda: active_hosts.append(check_host(ip)))
+                thread.start()
+                threads.append(thread)
+
+            for thread in threads:
+                thread.join()
+
+            active_hosts = [host for host in active_hosts if host]
+            for host in active_hosts:
+                if host != self.host:
+                    self.devices_list.insert(tk.END, f"💻 {host}")
+
             if self.devices_list.size() == 0:
                 self.devices_list.insert(tk.END, "No devices found")
 
-        threading.Thread(target=scan, daemon=True).start()
+        threading.Thread(target=scan).start()
 
     def on_device_select(self, event):
         selected_indices = self.devices_list.curselection()
         if selected_indices:
-            selected_ip = self.devices_list.get(selected_indices[0]).split()[1]
+            selected_ip = self.devices_list.get(selected_indices[0]).split()[-1]
             file_list = self.request_file_list(selected_ip)
             if file_list:
                 self.display_remote_files(file_list, selected_ip)
@@ -73,14 +129,11 @@ class Networking:
     def request_file_list(self, ip):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.settimeout(5)  # Set a timeout of 5 seconds
+                s.settimeout(5)
                 s.connect((ip, self.port))
-                s.sendall(b"REQUEST_FILE_LIST")
+                s.sendall("REQUEST_FILE_LIST".encode())
                 data = s.recv(4096)
                 return json.loads(data.decode())
-            except socket.timeout:
-                print(f"Connection to {ip} timed out")
-                return None
             except Exception as e:
                 print(f"Error requesting file list from {ip}: {str(e)}")
                 return None
@@ -90,75 +143,63 @@ class Networking:
         remote_files_window.title(f"Files on {remote_ip}")
         remote_files_window.geometry("400x300")
 
-        listbox = tk.Listbox(remote_files_window)
-        listbox.pack(fill=tk.BOTH, expand=True)
+        listbox = tk.Listbox(remote_files_window, font=("Segoe UI", 12))
+        listbox.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 
         for file in file_list:
             listbox.insert(tk.END, file['name'])
 
-        download_button = tk.Button(remote_files_window, text="Download Selected", command=lambda: self.download_selected(listbox, remote_ip))
-        download_button.pack()
+        def download_selected():
+            selection = listbox.curselection()
+            if selection:
+                file_name = listbox.get(selection[0])
+                save_path = filedialog.asksaveasfilename(defaultextension="", initialfile=file_name)
+                if save_path:
+                    self.download_file(remote_ip, file_name, save_path)
 
-    def download_selected(self, listbox, remote_ip):
-        selected = listbox.curselection()
-        if selected:
-            file_name = listbox.get(selected[0])
-            self.request_download(remote_ip, file_name)
+        download_button = tk.Button(remote_files_window, text="Download", command=download_selected)
+        download_button.pack(pady=10)
 
-    def request_download(self, remote_ip, file_name):
+    def download_file(self, remote_ip, file_name, save_path):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.connect((remote_ip, self.port))
                 s.sendall(f"DOWNLOAD:{file_name}".encode())
                 file_size = struct.unpack("!Q", s.recv(8))[0]
-            
-                save_path = filedialog.asksaveasfilename(defaultextension="", initialfile=file_name)
-                if save_path:
+                if file_size > 0:
                     with open(save_path, "wb") as f:
                         remaining = file_size
-                        while remaining:
+                        while remaining > 0:
                             chunk = s.recv(min(remaining, 4096))
                             if not chunk:
                                 break
                             f.write(chunk)
                             remaining -= len(chunk)
                     messagebox.showinfo("Download Complete", f"{file_name} has been downloaded successfully.")
+                else:
+                    messagebox.showerror("Download Error", f"File {file_name} not found on the remote device.")
             except Exception as e:
                 messagebox.showerror("Download Error", f"Failed to download {file_name}: {str(e)}")
 
-    def handle_download(self, conn, item_name):
-        item_path = os.path.join(self.file_ops.shared_directory, item_name)
-        if os.path.isdir(item_path):
-            # Create a temporary zip file
-            zip_path = os.path.join(self.file_ops.shared_directory, f"{item_name}.zip")
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(item_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, item_path)
-                        zipf.write(file_path, arcname)
-            
-            file_size = os.path.getsize(zip_path)
-            conn.sendall(struct.pack("!Q", file_size))
-            
-            with open(zip_path, "rb") as f:
-                while True:
-                    chunk = f.read(4096)
-                    if not chunk:
-                        break
-                    conn.sendall(chunk)
-            
-            os.remove(zip_path)
-        else:
-            file_size = os.path.getsize(item_path)
-            conn.sendall(struct.pack("!Q", file_size))
-            
-            with open(item_path, "rb") as f:
-                while True:
-                    chunk = f.read(4096)
-                    if not chunk:
-                        break
-                    conn.sendall(chunk)
+    def upload_file(self, remote_ip):
+        file_path = filedialog.askopenfilename()
+        if file_path:
+            file_name = os.path.basename(file_path)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.connect((remote_ip, self.port))
+                    s.sendall(f"UPLOAD:{file_name}".encode())
+                    file_size = os.path.getsize(file_path)
+                    s.sendall(struct.pack("!Q", file_size))
+                    with open(file_path, "rb") as f:
+                        while True:
+                            chunk = f.read(4096)
+                            if not chunk:
+                                break
+                            s.sendall(chunk)
+                    messagebox.showinfo("Upload Complete", f"{file_name} has been uploaded successfully.")
+                except Exception as e:
+                    messagebox.showerror("Upload Error", f"Failed to upload {file_name}: {str(e)}")
 
     def add_manual_device(self):
         ip = simpledialog.askstring("Add Device", "Enter the IP address of the device:")
@@ -167,24 +208,5 @@ class Networking:
             messagebox.showinfo("Device Added", f"Device with IP {ip} has been added to the list.")
 
     def show_current_ip(self):
-        ip = get_wifi_ip() or socket.gethostbyname(socket.gethostname())
-        messagebox.showinfo("Current IP", f"Your current IP address is: {ip}")
-
-    def test_connection(self):
-        ip = simpledialog.askstring("Test Connection", "Enter the IP address to test:")
-        if ip:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5)
-                    s.connect((ip, self.port))
-                    s.sendall(b"TEST_CONNECTION")
-                    response = s.recv(1024)
-                    if response == b"CONNECTION_OK":
-                        messagebox.showinfo("Connection Test", f"Successfully connected to {ip}")
-                    else:
-                        messagebox.showerror("Connection Test", f"Received unexpected response from {ip}")
-            except socket.timeout:
-                messagebox.showerror("Connection Test", f"Connection to {ip} timed out")
-            except Exception as e:
-                messagebox.showerror("Connection Test", f"Failed to connect to {ip}: {str(e)}")
+        messagebox.showinfo("Current IP", f"Your current IP address is: {self.host}")
 
